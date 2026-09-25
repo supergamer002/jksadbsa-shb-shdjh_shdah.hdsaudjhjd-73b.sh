@@ -122,17 +122,12 @@ jobs:
             echo "========================================"
 
             set +e
-
-            timeout \
-              --signal=SIGINT \
-              --kill-after=60s \
-              90m \
-              python generate_qa.py \
-                --input segmenti/ingegneria/chimica/*/*.json \
-                --output-dir dataset_generation/out \
-                --esempi-per-unita 3 \
-                --provider api \
-                --blocco-unita 6
+            python generate_qa.py \
+              --input segmenti/ingegneria/chimica/*/*.json \
+              --output-dir dataset_generation/out \
+              --esempi-per-unita 3 \
+              --provider api \
+              --blocco-unita 6
 
             EXIT_CODE=$?
 
@@ -168,10 +163,6 @@ jobs:
             echo "Nessun timeout interno."
             echo "========================================"
 
-            timeout \
-              --signal=SIGINT \
-              --kill-after=60s \
-              300m \
             python generate_qa.py \
               --input segmenti/ingegneria/chimica/*/*.json \
               --output-dir dataset_generation/out \
