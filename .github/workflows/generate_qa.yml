@@ -1,0 +1,402 @@
+name: Generazione Q&A
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    # Feriali — sessione notturna: 04:00 Italia (CEST, UTC+2) = 02:00 UTC
+    - cron: '0 2 * * 1-5'
+
+    # Feriali — sessione mattutina: 09:10 Italia (CEST, UTC+2) = 07:10 UTC
+    - cron: '10 7 * * 1-5'
+
+    # Weekend — sessione unica: 08:00 Italia (CEST, UTC+2) = 06:00 UTC
+    - cron: '0 6 * * 0,6'
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: generate-qa
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+
+      # ============================================================
+      # 1. Checkout
+      # ============================================================
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ============================================================
+      # 2. Python
+      # ============================================================
+      - name: Configura Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ============================================================
+      # 3. Dipendenze
+      # ============================================================
+      - name: Installa dipendenze
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # ============================================================
+      # 4. Decritta progetto
+      # ============================================================
+      - name: Decritta progetto
+        env:
+          PROJECT_AES_KEY: ${{ secrets.PROJECT_AES_KEY }}
+
+        run: |
+          python bootstrap.py decrypt
+
+      # ============================================================
+      # 5. Controllo dataset
+      # ============================================================
+      - name: Controlla dataset
+        run: |
+          set -e
+
+          if [ ! -d "segmenti" ]; then
+            echo "ERRORE: cartella segmenti/ non trovata."
+            exit 1
+          fi
+
+          echo "Dataset trovato."
+
+          echo
+          echo "Numero file JSON:"
+          find segmenti -type f -name "*.json" | wc -l
+
+          echo
+          echo "Prime 20 unità:"
+          find segmenti -type f -name "*.json" | head -20
+
+      # ============================================================
+      # 6. Generazione Q&A
+      # ============================================================
+      - name: Genera Q&A
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          G1THUB_TOKEN: ${{ secrets.G1THUB_TOKEN }}
+
+        run: |
+          set -o pipefail
+
+          # --------------------------------------------------------
+          # NOTTURNO
+          #
+          # Il job GitHub ha un timeout HARD di 90 minuti.
+          # Fermiamo volontariamente la generazione a 80 minuti,
+          # lasciando circa 10 minuti per:
+          #
+          #   - chiudere eventuali operazioni in corso
+          #   - controllare i risultati
+          #   - ricifrare
+          #   - fare commit
+          #   - fare push
+          #
+          # In questo modo non aspettiamo il kill forzato di GitHub.
+          # --------------------------------------------------------
+          if [ "${{ github.event_name }}" = "schedule" ] && \
+             [ "${{ github.event.schedule }}" = "0 2 * * 1-5" ]; then
+
+            echo "========================================"
+            echo "SESSIONE NOTTURNA"
+            echo "========================================"
+            echo "Timeout GitHub: 90 minuti"
+            echo "Timeout generazione: 80 minuti"
+            echo "Tempo riservato al salvataggio: ~10 minuti"
+            echo "========================================"
+
+            set +e
+
+            timeout \
+              --signal=SIGINT \
+              --kill-after=60s \
+              90m \
+              python generate_qa.py \
+                --input segmenti/ingegneria/chimica/*/*.json \
+                --output-dir dataset_generation/out \
+                --esempi-per-unita 3 \
+                --provider api \
+                --blocco-unita 6
+
+            EXIT_CODE=$?
+
+            set -e
+
+            if [ "$EXIT_CODE" -eq 124 ] || [ "$EXIT_CODE" -eq 130 ]; then
+              echo
+              echo "========================================"
+              echo "FINE FINESTRA NOTTURNA"
+              echo "========================================"
+              echo "La generazione è stata fermata"
+              echo "volontariamente prima del timeout GitHub."
+              echo "Il workflow continua con salvataggio e push."
+              echo "========================================"
+            elif [ "$EXIT_CODE" -ne 0 ]; then
+              echo
+              echo "ERRORE: generate_qa.py terminato con codice $EXIT_CODE."
+              exit "$EXIT_CODE"
+            fi
+
+          else
+
+            # ------------------------------------------------------
+            # DIURNO / WEEKEND / MANUALE
+            #
+            # Nessun timeout interno: rimane il limite GitHub
+            # originale di 350 minuti.
+            # ------------------------------------------------------
+            echo "========================================"
+            echo "SESSIONE STANDARD"
+            echo "========================================"
+            echo "Timeout GitHub: 350 minuti"
+            echo "Nessun timeout interno."
+            echo "========================================"
+
+            timeout \
+              --signal=SIGINT \
+              --kill-after=60s \
+              300m \
+            python generate_qa.py \
+              --input segmenti/ingegneria/chimica/*/*.json \
+              --output-dir dataset_generation/out \
+              --esempi-per-unita 3 \
+              --provider api \
+              --blocco-unita 6
+
+          fi
+
+      # ============================================================
+      # 7. Controlla risultati
+      # ============================================================
+      - name: Controlla risultati
+        run: |
+          echo
+          echo "========================================"
+          echo "RISULTATI"
+          echo "========================================"
+
+          if [ -f "dataset_generation/out/state.db" ]; then
+            echo "state.db: OK"
+            ls -lh dataset_generation/out/state.db
+          else
+            echo "ATTENZIONE: state.db non trovato"
+          fi
+
+          if [ -f "dataset_generation/out/qa_raw.jsonl" ]; then
+            echo "qa_raw.jsonl: OK"
+            ls -lh dataset_generation/out/qa_raw.jsonl
+
+            echo
+            echo "Numero Q&A:"
+            wc -l dataset_generation/out/qa_raw.jsonl
+          else
+            echo "ATTENZIONE: qa_raw.jsonl non trovato"
+          fi
+
+      # ============================================================
+      # 8. Controlla completamento dataset
+      # ============================================================
+      - name: Controlla completamento dataset
+        id: completion
+        run: |
+          python - <<'PY'
+          import importlib.util
+          import json
+          import sqlite3
+          from pathlib import Path
+
+          DB = Path("dataset_generation/out/state.db")
+          ROOT = Path("segmenti/ingegneria/chimica")
+          ESEMPI_PER_UNITA = 3
+
+          if not DB.exists():
+              print("state.db non trovato.")
+              Path("/tmp/dataset_completed").write_text("false")
+              raise SystemExit(0)
+
+          # --------------------------------------------------------
+          # Carica generate_qa.py per usare ESATTAMENTE la stessa
+          # logica di pianificazione delle varianti.
+          # --------------------------------------------------------
+          spec = importlib.util.spec_from_file_location(
+              "generate_qa",
+              "generate_qa.py"
+          )
+
+          generate_qa = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(generate_qa)
+
+          conn = sqlite3.connect(DB)
+
+          totale_attese = 0
+          totale_completate = 0
+          mancanti = []
+
+          # --------------------------------------------------------
+          # Analizza tutti i file JSON del dataset
+          # --------------------------------------------------------
+          for path in sorted(ROOT.glob("*/*.json")):
+
+              try:
+                  with open(path, encoding="utf-8") as f:
+                      unita_list = json.load(f)
+
+              except Exception as e:
+                  print(
+                      f"ATTENZIONE: impossibile leggere {path}: {e}"
+                  )
+                  continue
+
+              for indice, unita in enumerate(unita_list):
+
+                  # generate_qa usa solo le unità idonee al fine-tuning
+                  if not unita.get("idoneo_finetuning", False):
+                      continue
+
+                  varianti = generate_qa.pianifica_varianti(
+                      indice,
+                      ESEMPI_PER_UNITA
+                  )
+
+                  for variante in varianti:
+
+                      totale_attese += 1
+
+                      hash_variante = generate_qa.variante_hash(
+                          unita,
+                          variante["variante_idx"],
+                          variante["formato"],
+                          variante["tipo_domanda"]
+                      )
+
+                      row = conn.execute(
+                          """
+                          SELECT stato
+                          FROM unita_processate
+                          WHERE hash = ?
+                          """,
+                          (hash_variante,)
+                      ).fetchone()
+
+                      if row and row[0] == "ok":
+                          totale_completate += 1
+                      else:
+                          mancanti.append(
+                              (
+                                  path,
+                                  indice,
+                                  variante["variante_idx"],
+                                  variante["formato"],
+                                  variante["tipo_domanda"]
+                              )
+                          )
+
+          conn.close()
+
+          # --------------------------------------------------------
+          # Report
+          # --------------------------------------------------------
+          print()
+          print("========================================")
+          print("CONTROLLO COMPLETAMENTO")
+          print("========================================")
+          print(f"Varianti attese:      {totale_attese}")
+          print(f"Varianti completate:  {totale_completate}")
+          print(f"Varianti mancanti:    {len(mancanti)}")
+
+          # --------------------------------------------------------
+          # Dataset completo
+          # --------------------------------------------------------
+          if totale_attese > 0 and not mancanti:
+
+              print()
+              print("🎉 DATASET COMPLETATO")
+
+              Path("/tmp/dataset_completed").write_text("true")
+
+          else:
+
+              print()
+              print("Dataset ancora in lavorazione.")
+
+              if mancanti:
+                  print("Prime varianti mancanti:")
+
+                  for item in mancanti[:10]:
+                      path, indice, variante_idx, formato, tipo = item
+
+                      print(
+                          f"  - {path} | unità {indice} | "
+                          f"variante {variante_idx} | "
+                          f"{formato} | {tipo}"
+                      )
+
+              Path("/tmp/dataset_completed").write_text("false")
+
+          PY
+
+          echo "completed=$(cat /tmp/dataset_completed)" >> "$GITHUB_OUTPUT"
+
+      # ============================================================
+      # 9. Notifica completamento
+      # ============================================================
+      - name: Notifica completamento
+        if: steps.completion.outputs.completed == 'true' && !hashFiles('.dataset_completed')
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+        run: |
+          gh issue create \
+            --title "🎉 Dataset Q&A completato" \
+            --body "Tutte le varianti previste per le unità idonee al fine-tuning sono state elaborate. Il dataset Q&A è completo." \
+            --assignee @me
+
+          touch .dataset_completed
+
+      # ============================================================
+      # 9.1. Ricifra progetto
+      # ============================================================
+      - name: Ricifra progetto
+        env:
+          PROJECT_AES_KEY: ${{ secrets.PROJECT_AES_KEY }}
+
+        run: |
+          python bootstrap.py encrypt
+
+      # ============================================================
+      # 10. Commit e push
+      # ============================================================
+      - name: Commit risultati
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "Nessuna modifica da committare."
+            exit 0
+          fi
+
+          git commit -m "Update dataset"
+
+          git fetch origin main
+          git rebase origin/main
+
+          git push origin main
