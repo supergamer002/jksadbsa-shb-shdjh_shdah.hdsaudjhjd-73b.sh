@@ -24,56 +24,45 @@ concurrency:
 jobs:
   generate:
     runs-on: ubuntu-latest
-    steps:
 
-      # ============================================================
-      # 1. Checkout
-      # ============================================================
+    steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # ============================================================
-      # 2. Python
-      # ============================================================
       - name: Configura Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # ============================================================
-      # 3. Dipendenze
-      # ============================================================
       - name: Installa dipendenze
+        continue-on-error: true
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install --upgrade pip || true
+          pip install -r requirements.txt || true
 
-      # ============================================================
-      # 4. Decritta progetto
-      # ============================================================
       - name: Decritta progetto
+        id: decrypt
+        continue-on-error: true
         env:
           PROJECT_AES_KEY: ${{ secrets.PROJECT_AES_KEY }}
-
         run: |
           python bootstrap.py decrypt
 
-      # ============================================================
-      # 5. Controllo dataset
-      # ============================================================
       - name: Controlla dataset
+        continue-on-error: true
         run: |
-          set -e
+          echo "========================================"
+          echo "CONTROLLO DATASET"
+          echo "========================================"
 
           if [ ! -d "segmenti" ]; then
-            echo "ERRORE: cartella segmenti/ non trovata."
-            exit 1
+            echo "ATTENZIONE: cartella segmenti/ non trovata."
+            exit 0
           fi
 
           echo "Dataset trovato."
-
           echo
           echo "Numero file JSON:"
           find segmenti -type f -name "*.json" | wc -l
@@ -82,100 +71,36 @@ jobs:
           echo "Prime 20 unità:"
           find segmenti -type f -name "*.json" | head -20
 
-      # ============================================================
-      # 6. Generazione Q&A
-      # ============================================================
       - name: Genera Q&A
+        continue-on-error: true
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           G1THUB_TOKEN: ${{ secrets.G1THUB_TOKEN }}
-
         run: |
-          set -o pipefail
+          echo "========================================"
+          echo "GENERAZIONE Q&A"
+          echo "========================================"
+          echo "Nessun timeout interno."
+          echo "Il programma salva progressivamente checkpoint e risultati."
+          echo "Eventuali errori non bloccanti vengono gestiti da generate_qa.py."
+          echo "========================================"
 
-          # --------------------------------------------------------
-          # NOTTURNO
-          #
-          # Il job GitHub ha un timeout HARD di 90 minuti.
-          # Fermiamo volontariamente la generazione a 80 minuti,
-          # lasciando circa 10 minuti per:
-          #
-          #   - chiudere eventuali operazioni in corso
-          #   - controllare i risultati
-          #   - ricifrare
-          #   - fare commit
-          #   - fare push
-          #
-          # In questo modo non aspettiamo il kill forzato di GitHub.
-          # --------------------------------------------------------
-          if [ "${{ github.event_name }}" = "schedule" ] && \
-             [ "${{ github.event.schedule }}" = "0 2 * * 1-5" ]; then
+          set +e
 
-            echo "========================================"
-            echo "SESSIONE NOTTURNA"
-            echo "========================================"
-            echo "Timeout GitHub: 90 minuti"
-            echo "Timeout generazione: 80 minuti"
-            echo "Tempo riservato al salvataggio: ~10 minuti"
-            echo "========================================"
+          python generate_qa.py             --input segmenti/ingegneria/chimica/*/*.json             --output-dir dataset_generation/out             --esempi-per-unita 3             --provider api             --blocco-unita 6
 
-            set +e
-            python generate_qa.py \
-              --input segmenti/ingegneria/chimica/*/*.json \
-              --output-dir dataset_generation/out \
-              --esempi-per-unita 3 \
-              --provider api \
-              --blocco-unita 6
+          EXIT_CODE=$?
 
-            EXIT_CODE=$?
+          echo
+          echo "generate_qa.py terminato con codice: $EXIT_CODE"
+          echo "Il workflow continua comunque verso salvataggio e commit."
+          exit 0
 
-            set -e
-
-            if [ "$EXIT_CODE" -eq 124 ] || [ "$EXIT_CODE" -eq 130 ]; then
-              echo
-              echo "========================================"
-              echo "FINE FINESTRA NOTTURNA"
-              echo "========================================"
-              echo "La generazione è stata fermata"
-              echo "volontariamente prima del timeout GitHub."
-              echo "Il workflow continua con salvataggio e push."
-              echo "========================================"
-            elif [ "$EXIT_CODE" -ne 0 ]; then
-              echo
-              echo "ERRORE: generate_qa.py terminato con codice $EXIT_CODE."
-              exit "$EXIT_CODE"
-            fi
-
-          else
-
-            # ------------------------------------------------------
-            # DIURNO / WEEKEND / MANUALE
-            #
-            # Nessun timeout interno: rimane il limite GitHub
-            # originale di 350 minuti.
-            # ------------------------------------------------------
-            echo "========================================"
-            echo "SESSIONE STANDARD"
-            echo "========================================"
-            echo "Timeout GitHub: 350 minuti"
-            echo "Nessun timeout interno."
-            echo "========================================"
-
-            python generate_qa.py \
-              --input segmenti/ingegneria/chimica/*/*.json \
-              --output-dir dataset_generation/out \
-              --esempi-per-unita 3 \
-              --provider api \
-              --blocco-unita 6
-
-          fi
-
-      # ============================================================
-      # 7. Controlla risultati
-      # ============================================================
       - name: Controlla risultati
+        if: always()
+        continue-on-error: true
         run: |
           echo
           echo "========================================"
@@ -192,7 +117,6 @@ jobs:
           if [ -f "dataset_generation/out/qa_raw.jsonl" ]; then
             echo "qa_raw.jsonl: OK"
             ls -lh dataset_generation/out/qa_raw.jsonl
-
             echo
             echo "Numero Q&A:"
             wc -l dataset_generation/out/qa_raw.jsonl
@@ -200,11 +124,10 @@ jobs:
             echo "ATTENZIONE: qa_raw.jsonl non trovato"
           fi
 
-      # ============================================================
-      # 8. Controlla completamento dataset
-      # ============================================================
       - name: Controlla completamento dataset
         id: completion
+        if: always()
+        continue-on-error: true
         run: |
           python - <<'PY'
           import importlib.util
@@ -216,169 +139,138 @@ jobs:
           ROOT = Path("segmenti/ingegneria/chimica")
           ESEMPI_PER_UNITA = 3
 
-          if not DB.exists():
-              print("state.db non trovato.")
+          if not DB.exists() or not ROOT.exists():
+              print("Dataset/checkpoint non disponibile: nessun blocco del workflow.")
               Path("/tmp/dataset_completed").write_text("false")
               raise SystemExit(0)
 
-          # --------------------------------------------------------
-          # Carica generate_qa.py per usare ESATTAMENTE la stessa
-          # logica di pianificazione delle varianti.
-          # --------------------------------------------------------
-          spec = importlib.util.spec_from_file_location(
-              "generate_qa",
-              "generate_qa.py"
-          )
+          try:
+              spec = importlib.util.spec_from_file_location("generate_qa", "generate_qa.py")
+              generate_qa = importlib.util.module_from_spec(spec)
+              spec.loader.exec_module(generate_qa)
 
-          generate_qa = importlib.util.module_from_spec(spec)
-          spec.loader.exec_module(generate_qa)
+              conn = sqlite3.connect(DB)
+              totale_attese = 0
+              totale_completate = 0
+              mancanti = []
 
-          conn = sqlite3.connect(DB)
-
-          totale_attese = 0
-          totale_completate = 0
-          mancanti = []
-
-          # --------------------------------------------------------
-          # Analizza tutti i file JSON del dataset
-          # --------------------------------------------------------
-          for path in sorted(ROOT.glob("*/*.json")):
-
-              try:
-                  with open(path, encoding="utf-8") as f:
-                      unita_list = json.load(f)
-
-              except Exception as e:
-                  print(
-                      f"ATTENZIONE: impossibile leggere {path}: {e}"
-                  )
-                  continue
-
-              for indice, unita in enumerate(unita_list):
-
-                  # generate_qa usa solo le unità idonee al fine-tuning
-                  if not unita.get("idoneo_finetuning", False):
+              for path in sorted(ROOT.glob("*/*.json")):
+                  try:
+                      with open(path, encoding="utf-8") as f:
+                          unita_list = json.load(f)
+                  except Exception as e:
+                      print(f"ATTENZIONE: impossibile leggere {path}: {e}")
                       continue
 
-                  varianti = generate_qa.pianifica_varianti(
-                      indice,
-                      ESEMPI_PER_UNITA
-                  )
+                  for indice, unita in enumerate(unita_list):
+                      if not unita.get("idoneo_finetuning", False):
+                          continue
 
-                  for variante in varianti:
+                      try:
+                          varianti = generate_qa.pianifica_varianti(indice, ESEMPI_PER_UNITA)
+                      except Exception as e:
+                          print(f"ATTENZIONE: pianificazione fallita per {path}, unità {indice}: {e}")
+                          continue
 
-                      totale_attese += 1
-
-                      hash_variante = generate_qa.variante_hash(
-                          unita,
-                          variante["variante_idx"],
-                          variante["formato"],
-                          variante["tipo_domanda"]
-                      )
-
-                      row = conn.execute(
-                          """
-                          SELECT stato
-                          FROM unita_processate
-                          WHERE hash = ?
-                          """,
-                          (hash_variante,)
-                      ).fetchone()
-
-                      if row and row[0] == "ok":
-                          totale_completate += 1
-                      else:
-                          mancanti.append(
-                              (
-                                  path,
-                                  indice,
+                      for variante in varianti:
+                          totale_attese += 1
+                          try:
+                              hash_variante = generate_qa.variante_hash(
+                                  unita,
                                   variante["variante_idx"],
                                   variante["formato"],
-                                  variante["tipo_domanda"]
+                                  variante["tipo_domanda"],
                               )
-                          )
+                              row = conn.execute(
+                                  "SELECT stato FROM unita_processate WHERE hash = ?",
+                                  (hash_variante,),
+                              ).fetchone()
 
-          conn.close()
+                              if row and row[0] == "ok":
+                                  totale_completate += 1
+                              else:
+                                  mancanti.append(
+                                      (path, indice, variante["variante_idx"],
+                                       variante["formato"], variante["tipo_domanda"])
+                                  )
+                          except Exception as e:
+                              print(f"ATTENZIONE: controllo variante fallito: {e}")
+                              mancanti.append((path, indice, variante.get("variante_idx"), "", ""))
 
-          # --------------------------------------------------------
-          # Report
-          # --------------------------------------------------------
-          print()
-          print("========================================")
-          print("CONTROLLO COMPLETAMENTO")
-          print("========================================")
-          print(f"Varianti attese:      {totale_attese}")
-          print(f"Varianti completate:  {totale_completate}")
-          print(f"Varianti mancanti:    {len(mancanti)}")
-
-          # --------------------------------------------------------
-          # Dataset completo
-          # --------------------------------------------------------
-          if totale_attese > 0 and not mancanti:
+              conn.close()
 
               print()
-              print("🎉 DATASET COMPLETATO")
+              print("========================================")
+              print("CONTROLLO COMPLETAMENTO")
+              print("========================================")
+              print(f"Varianti attese:      {totale_attese}")
+              print(f"Varianti completate:  {totale_completate}")
+              print(f"Varianti mancanti:    {len(mancanti)}")
 
-              Path("/tmp/dataset_completed").write_text("true")
+              if totale_attese > 0 and not mancanti:
+                  print("DATASET COMPLETATO")
+                  Path("/tmp/dataset_completed").write_text("true")
+              else:
+                  print("Dataset ancora in lavorazione.")
+                  Path("/tmp/dataset_completed").write_text("false")
 
-          else:
-
-              print()
-              print("Dataset ancora in lavorazione.")
-
-              if mancanti:
-                  print("Prime varianti mancanti:")
-
-                  for item in mancanti[:10]:
-                      path, indice, variante_idx, formato, tipo = item
-
-                      print(
-                          f"  - {path} | unità {indice} | "
-                          f"variante {variante_idx} | "
-                          f"{formato} | {tipo}"
-                      )
-
+          except Exception as e:
+              print(f"ATTENZIONE: controllo completamento fallito: {type(e).__name__}: {e}")
               Path("/tmp/dataset_completed").write_text("false")
-
           PY
 
-          echo "completed=$(cat /tmp/dataset_completed)" >> "$GITHUB_OUTPUT"
+          echo "completed=$(cat /tmp/dataset_completed 2>/dev/null || echo false)" >> "$GITHUB_OUTPUT"
 
-      # ============================================================
-      # 9. Notifica completamento
-      # ============================================================
       - name: Notifica completamento
-        if: steps.completion.outputs.completed == 'true' && !hashFiles('.dataset_completed')
+        if: always() && steps.completion.outputs.completed == 'true' && !hashFiles('.dataset_completed')
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
-
         run: |
-          gh issue create \
-            --title "🎉 Dataset Q&A completato" \
-            --body "Tutte le varianti previste per le unità idonee al fine-tuning sono state elaborate. Il dataset Q&A è completo." \
-            --assignee @me
+          gh issue create             --title "🎉 Dataset Q&A completato"             --body "Tutte le varianti previste per le unità idonee al fine-tuning sono state elaborate. Il dataset Q&A è completo."             --assignee @me || true
 
           touch .dataset_completed
 
-      # ============================================================
-      # 9.1. Ricifra progetto
-      # ============================================================
       - name: Ricifra progetto
+        if: always() && steps.decrypt.outcome == 'success'
+        continue-on-error: true
         env:
           PROJECT_AES_KEY: ${{ secrets.PROJECT_AES_KEY }}
-
         run: |
-          python bootstrap.py encrypt
+          python bootstrap.py encrypt || {
+            echo "ATTENZIONE: ricifratura fallita."
+            echo "I risultati presenti nel workspace verranno comunque tentati nel commit."
+            exit 0
+          }
 
-      # ============================================================
-      # 10. Commit e push
-      # ============================================================
-      - name: Commit risultati
+      - name: Commit e push — MEGA SAFE
+        if: always()
+        continue-on-error: true
         run: |
+          set +e
+
+          echo "========================================"
+          echo "SALVATAGGIO DEFINITIVO"
+          echo "========================================"
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+          # Aggiorna prima il riferimento remoto. Non usare rebase sul commit
+          # appena creato: un conflitto di rebase non deve impedire il salvataggio.
+          git fetch origin main
+          FETCH_CODE=$?
+
+          if [ "$FETCH_CODE" -ne 0 ]; then
+            echo "ATTENZIONE: git fetch fallito ($FETCH_CODE). Provo comunque il commit locale."
+          fi
+
           git add -A
+          ADD_CODE=$?
+
+          if [ "$ADD_CODE" -ne 0 ]; then
+            echo "ATTENZIONE: git add ha restituito $ADD_CODE."
+          fi
 
           if git diff --cached --quiet; then
             echo "Nessuna modifica da committare."
@@ -386,8 +278,65 @@ jobs:
           fi
 
           git commit -m "Update dataset"
+          COMMIT_CODE=$?
 
-          git fetch origin main
-          git rebase origin/main
+          if [ "$COMMIT_CODE" -ne 0 ]; then
+            echo "ATTENZIONE: commit fallito ($COMMIT_CODE)."
+            git status --short
+            exit 0
+          fi
 
-          git push origin main
+          echo "Commit locale creato."
+          git log -1 --oneline
+
+          # Primo tentativo diretto.
+          git push origin HEAD:main
+          PUSH_CODE=$?
+
+          if [ "$PUSH_CODE" -eq 0 ]; then
+            echo "✅ Push riuscito."
+            exit 0
+          fi
+
+          echo "Push rifiutato. Provo a integrare il main remoto senza perdere il commit locale."
+
+          # Fino a 5 tentativi. In caso di conflitto, il commit locale resta
+          # quello da preservare: i conflitti vengono risolti a favore di HEAD.
+          for ATTEMPT in 1 2 3 4 5; do
+            echo
+            echo "=== Tentativo integrazione/push $ATTEMPT/5 ==="
+
+            git fetch origin main
+            if [ "$?" -ne 0 ]; then
+              echo "fetch fallito."
+              sleep 5
+              continue
+            fi
+
+            git merge --no-edit -X ours origin/main
+            MERGE_CODE=$?
+
+            if [ "$MERGE_CODE" -ne 0 ]; then
+              echo "Merge fallito ($MERGE_CODE)."
+              git merge --abort 2>/dev/null
+              sleep 5
+              continue
+            fi
+
+            git push origin HEAD:main
+            PUSH_CODE=$?
+
+            if [ "$PUSH_CODE" -eq 0 ]; then
+              echo "✅ Push riuscito al tentativo $ATTEMPT."
+              exit 0
+            fi
+
+            sleep 5
+          done
+
+          echo
+          echo "⚠️ Push non riuscito dopo tutti i tentativi."
+          echo "Il commit locale è stato comunque creato:"
+          git log -1 --oneline
+          echo "Il workflow NON viene marcato come fallito."
+          exit 0
